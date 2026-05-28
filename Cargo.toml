@@ -1,0 +1,103 @@
+[package]
+name = "remotemedia-candle-nodes"
+version = "0.4.0"
+edition = "2021"
+rust-version.workspace = true
+authors = ["RemoteMedia SDK Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
+description = "Candle ML inference nodes for RemoteMedia pipelines"
+
+[dependencies]
+# Core workspace dependencies
+tokio = { version = "1.35", features = ["sync", "macros", "io-util", "rt", "rt-multi-thread", "time", "fs", "process", "signal"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+async-trait = { version = "0.1" }
+tracing = { version = "0.1" }
+thiserror = { version = "1.0" }
+anyhow = { version = "1.0" }
+
+# Candle ML framework (git main for CUDA 13 support via latest cudarc)
+candle-core = { git = "https://github.com/huggingface/candle", optional = true }
+candle-nn = { git = "https://github.com/huggingface/candle", optional = true }
+candle-transformers = { git = "https://github.com/huggingface/candle", optional = true }
+candle-onnx = { git = "https://github.com/huggingface/candle", optional = true }
+
+# HuggingFace Hub for model downloads
+hf-hub = { version = "0.4", default-features = false, features = ["tokio", "ureq", "rustls-tls"], optional = true }
+
+# Tokenizers for LLM text processing
+tokenizers = { version = "0.20", optional = true }
+
+# ndarray for mel filterbank computation (EOU node)
+ndarray = { version = "0.16", optional = true }
+
+# Audio processing for Whisper
+rubato = { version = "0.15" }
+
+# RemoteMedia core for StreamingNode trait
+# Enable multiprocess for inventory-based auto-registration
+remotemedia-core = { path = "../core", default-features = false, features = ["multiprocess"] }
+
+# Trait-surface and wire-data crates the `#[node]` macro expands to
+# absolute paths (`remotemedia_traits::...`, `remotemedia_types::...`).
+# Direct deps because the macro doesn't go through `remotemedia_core::`.
+remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk.git", rev = "f98ba9df8d57ecc8a7bcbaeb9a84299779a78722" }
+remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk.git", rev = "f98ba9df8d57ecc8a7bcbaeb9a84299779a78722" }
+
+# Utilities
+dirs = { version = "5.0" }
+rand = { version = "0.8" }
+schemars = { version = "0.8" }
+
+# Auto-registration
+inventory = { version = "0.3" }
+
+# Loadable-export plugin SDK (only pulled in when the `loadable-export`
+# cargo feature is enabled). This is what flips the `#[node]` macro's
+# conditional FFI emission on, so a wrapper cdylib can re-export
+# WhisperNode through `plugin_export!()` without forking the source.
+remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk.git", rev = "f98ba9df8d57ecc8a7bcbaeb9a84299779a78722", optional = true }
+abi_stable             = { version = "0.11", optional = true }
+
+[dev-dependencies]
+tokio-test = { version = "0.4" }
+criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = { version = "3.8" }
+hound = { version = "3.5" }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[features]
+default = []
+
+# Model family features
+whisper = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
+yolo = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub"]
+llm = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:tokenizers"]
+vad = ["dep:candle-core", "dep:candle-onnx", "dep:hf-hub"]
+eou = ["dep:candle-core", "dep:candle-onnx", "dep:hf-hub", "dep:tokenizers", "dep:ndarray"]
+
+# Hardware acceleration features
+cuda = ["candle-core?/cuda", "candle-nn?/cuda", "candle-transformers?/cuda"]
+metal = ["candle-core?/metal", "candle-nn?/metal", "candle-transformers?/metal"]
+
+# Convenience feature for all models
+all-models = ["whisper", "yolo", "llm", "vad", "eou"]
+
+# Phase B / Path 2 — turns on the FFI plumbing that the `#[node]`
+# macro emits under `#[cfg(feature = "loadable-export")]`. Pulled in
+# by wrapper cdylib crates (see `examples/whisper-loadable/`).
+loadable-export = ["dep:remotemedia-plugin-sdk", "dep:abi_stable"]
+
+[[bench]]
+name = "inference_bench"
+harness = false
+
+[[example]]
+name = "whisper_test"
+required-features = ["whisper"]
+
+[[example]]
+name = "vad_test"
+required-features = ["vad"]
