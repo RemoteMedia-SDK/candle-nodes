@@ -16,7 +16,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-remotemedia-candle-nodes = { path = "../candle-nodes", features = ["whisper"] }
+remotemedia-candle-nodes = { git = "https://github.com/RemoteMedia-SDK/candle-nodes.git", features = ["whisper"] }
 ```
 
 ### Feature Flags
