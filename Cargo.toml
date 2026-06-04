@@ -2,7 +2,7 @@
 name = "remotemedia-candle-nodes"
 version = "0.4.0"
 edition = "2021"
-rust-version.workspace = true
+rust-version = "1.88"
 authors = ["RemoteMedia SDK Contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/RemoteMedia-SDK/candle-nodes"
@@ -38,13 +38,12 @@ rubato = { version = "0.15" }
 
 # RemoteMedia core for StreamingNode trait
 # Enable multiprocess for inventory-based auto-registration
-remotemedia-core = { path = "../core", default-features = false, features = ["multiprocess"] }
-
+remotemedia-core = { package = "remotemedia-sdk-base", git = "https://github.com/RemoteMedia-SDK/remotemedia-sdk-base", rev = "042a82fb46ad87c470211636d84f36326e574aa8", default-features = false, features = ["multiprocess"] }
 # Trait-surface and wire-data crates the `#[node]` macro expands to
 # absolute paths (`remotemedia_traits::...`, `remotemedia_types::...`).
 # Direct deps because the macro doesn't go through `remotemedia_core::`.
-remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk.git", rev = "f98ba9df8d57ecc8a7bcbaeb9a84299779a78722" }
-remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk.git", rev = "f98ba9df8d57ecc8a7bcbaeb9a84299779a78722" }
+remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "b0c04076f2e6432c448c69a59d0ee577f15b8662" }
+remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "b0c04076f2e6432c448c69a59d0ee577f15b8662" }
 
 # Utilities
 dirs = { version = "5.0" }
@@ -58,7 +57,7 @@ inventory = { version = "0.3" }
 # cargo feature is enabled). This is what flips the `#[node]` macro's
 # conditional FFI emission on, so a wrapper cdylib can re-export
 # WhisperNode through `plugin_export!()` without forking the source.
-remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk.git", rev = "f98ba9df8d57ecc8a7bcbaeb9a84299779a78722", optional = true }
+remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "b0c04076f2e6432c448c69a59d0ee577f15b8662", optional = true }
 abi_stable             = { version = "0.11", optional = true }
 
 [dev-dependencies]
@@ -101,3 +100,6 @@ required-features = ["whisper"]
 [[example]]
 name = "vad_test"
 required-features = ["vad"]
+
+
+
