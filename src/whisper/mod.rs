@@ -15,6 +15,7 @@
 //!   `WhisperNode` through `plugin_export!()`.
 
 mod model;
+mod streaming;
 
 pub use model::{WhisperModel, WhisperModelExt};
 
@@ -27,6 +28,7 @@ use crate::error::CandleNodeError;
 // generic two-arg `Result` at the `#[node]` macro expansion site
 // (the macro emits `Result<RuntimeData, Error>` in absolute paths
 // and a 1-arg shadowed `Result` makes that look like a misuse).
+use self::streaming::{DecodedSegment, StreamingOptions, WhisperStreamingState};
 use crate::error::Result as CResult;
 
 use async_trait::async_trait;
@@ -34,15 +36,15 @@ use remotemedia_core::capabilities::{
     AudioConstraints, CapabilityBehavior, ConstraintValue, MediaCapabilities, MediaConstraints,
 };
 use remotemedia_core::data::RuntimeData;
+use remotemedia_core::node;
 use remotemedia_core::nodes::streaming_node::{
     AsyncStreamingNode, InitializeContextRead, NodeRuntimeContextRead, StreamingNode,
     StreamingNodeFactory,
 };
 use remotemedia_core::Error;
-use remotemedia_core::node;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 
 #[cfg(feature = "whisper")]
@@ -94,11 +96,12 @@ pub(crate) struct WhisperModelState {
     node_type = "Whisper",
     category = "ml",
     description = "Speech-to-text transcription via OpenAI Whisper (Candle backend)",
-    accepts = "audio",
-    produces = "text",
+    accepts = "audio,json",
+    produces = "text,json",
     capabilities = "static",
     input_caps = "audio(sample_rate=16000, channels=1, format=F32)",
-    output_caps = "text"
+    output_caps = "text",
+    streaming = true
 )]
 pub struct WhisperNode {
     /// Model variant to use (Tiny / Base / Small / Medium / LargeV3).
@@ -117,6 +120,26 @@ pub struct WhisperNode {
     #[config(default = true)]
     pub streaming: bool,
 
+    /// New normalized audio required between streaming inference passes.
+    #[config(default = 2000)]
+    pub streaming_decode_interval_ms: u32,
+
+    /// Audio retained before the last committed timestamp for decoder context.
+    #[config(default = 750)]
+    pub streaming_overlap_ms: u32,
+
+    /// Hard upper bound for audio decoded by any streaming inference pass.
+    #[config(default = 30000)]
+    pub streaming_max_window_ms: u32,
+
+    /// Consecutive hypotheses required before text becomes stable.
+    #[config(default = 2)]
+    pub streaming_agreement_updates: usize,
+
+    /// Agreed trailing words kept revisable to avoid premature commitment.
+    #[config(default = 2)]
+    pub streaming_trailing_guard_words: usize,
+
     /// Task: "transcribe" or "translate".
     #[config(default = "transcribe".to_string())]
     pub task: String,
@@ -125,6 +148,14 @@ pub struct WhisperNode {
     /// Populated on first call to `initialize()` or `process_impl()`.
     #[state(default = RwLock::new(None))]
     model_state: RwLock<Option<WhisperModelState>>,
+
+    /// Incremental audio, agreement, and revision state for this node instance.
+    #[state(default = Mutex::new(WhisperStreamingState::default()))]
+    streaming_state: Mutex<WhisperStreamingState>,
+
+    /// Serializes streaming state transitions across concurrent input arrivals.
+    #[state(default = Mutex::new(()))]
+    streaming_gate: Mutex<()>,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +189,25 @@ impl WhisperNodeConfig {
                 self.task
             ));
         }
+        if self.streaming_decode_interval_ms == 0 {
+            return Err("streaming_decode_interval_ms must be greater than zero".to_string());
+        }
+        if !(1000..=30000).contains(&self.streaming_max_window_ms) {
+            return Err("streaming_max_window_ms must be between 1000 and 30000".to_string());
+        }
+        if self.streaming_overlap_ms >= self.streaming_max_window_ms {
+            return Err(
+                "streaming_overlap_ms must be smaller than streaming_max_window_ms".to_string(),
+            );
+        }
+        if self.streaming_decode_interval_ms > self.streaming_max_window_ms {
+            return Err(
+                "streaming_decode_interval_ms must not exceed streaming_max_window_ms".to_string(),
+            );
+        }
+        if self.streaming_agreement_updates < 2 {
+            return Err("streaming_agreement_updates must be at least 2".to_string());
+        }
         Ok(())
     }
 }
@@ -188,10 +238,7 @@ impl WhisperNode {
 
     /// User-supplied processing entry point. The `#[node]` macro
     /// generates the trait impl that delegates here.
-    pub async fn process_impl(
-        &self,
-        data: RuntimeData,
-    ) -> std::result::Result<RuntimeData, Error> {
+    pub async fn process_impl(&self, data: RuntimeData) -> std::result::Result<RuntimeData, Error> {
         // Extract metadata from input
         let input_metadata = match &data {
             RuntimeData::Audio { metadata, .. } => metadata.clone(),
@@ -216,6 +263,105 @@ impl WhisperNode {
                 })))
             }
             _ => Ok(RuntimeData::Text(transcription)),
+        }
+    }
+
+    fn streaming_options(&self) -> StreamingOptions {
+        StreamingOptions {
+            decode_interval_ms: self.config.streaming_decode_interval_ms,
+            overlap_ms: self.config.streaming_overlap_ms,
+            max_window_ms: self.config.streaming_max_window_ms,
+            agreement_updates: self.config.streaming_agreement_updates,
+            trailing_guard_words: self.config.streaming_trailing_guard_words,
+        }
+    }
+
+    /// Native incremental Whisper path used by in-tree and loadable runtimes.
+    /// Audio inputs contain only new PCM; JSON `{ "type": "flush" }`
+    /// finalizes the latest hypothesis.
+    pub async fn process_streaming_impl<F>(
+        &self,
+        data: RuntimeData,
+        _session_id: Option<String>,
+        mut callback: F,
+    ) -> std::result::Result<usize, Error>
+    where
+        F: FnMut(RuntimeData) -> std::result::Result<(), Error> + Send,
+    {
+        if !self.config.streaming {
+            callback(self.process_impl(data).await?)?;
+            return Ok(1);
+        }
+
+        // The trait permits concurrent arrivals. Keep audio mutation, decode,
+        // and hypothesis application in stream order for deterministic
+        // revision numbers and local-agreement history.
+        let _gate = self.streaming_gate.lock().await;
+        let options = self.streaming_options();
+
+        let (window, final_result) = match data {
+            RuntimeData::Audio {
+                samples,
+                sample_rate,
+                channels,
+                ..
+            } => {
+                let mut stream = self.streaming_state.lock().await;
+                stream
+                    .push_audio(&samples, sample_rate, channels)
+                    .map_err(|e| Error::Execution(e.to_string()))?;
+                (stream.decode_window(options, false), false)
+            }
+            RuntimeData::Json(value)
+                if value
+                    .get("type")
+                    .or_else(|| value.get("command"))
+                    .and_then(Value::as_str)
+                    == Some("flush") =>
+            {
+                let mut stream = self.streaming_state.lock().await;
+                (stream.decode_window(options, true), true)
+            }
+            other => {
+                return Err(Error::Execution(format!(
+                    "Whisper streaming accepts Audio or JSON flush, got {:?}",
+                    other.data_type()
+                )))
+            }
+        };
+
+        let Some(window) = window else {
+            if final_result {
+                return Err(Error::Execution(
+                    "Whisper flush received before any audio".to_string(),
+                ));
+            }
+            return Ok(0);
+        };
+
+        let audio = AudioData {
+            samples: window.samples,
+            sample_rate: streaming::WHISPER_SAMPLE_RATE,
+            channels: 1,
+        };
+        let segments = self
+            .transcribe_segments(audio, true)
+            .await
+            .map_err(|e| Error::Execution(e.to_string()))?;
+
+        let event = self.streaming_state.lock().await.apply_hypothesis(
+            segments,
+            window.start_ms,
+            options,
+            final_result,
+        );
+        if let Some(event) = event {
+            callback(RuntimeData::Json(serde_json::to_value(event).map_err(
+                |e| Error::Execution(format!("serialize transcript event: {e}")),
+            )?))?;
+            Ok(1)
+        } else {
+            Ok(0)
         }
     }
 
@@ -308,18 +454,42 @@ impl WhisperNode {
         Ok(mel_filters)
     }
 
-    /// Transcribe audio data
+    /// Transcribe audio data through the backwards-compatible batch API.
     #[cfg(feature = "whisper")]
     async fn transcribe(&self, audio: AudioData) -> CResult<String> {
-        // Ensure model is loaded
+        Ok(self
+            .transcribe_segments(audio, false)
+            .await?
+            .into_iter()
+            .map(|segment| segment.text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+
+    /// Decode one bounded audio window. Streaming mode enables timestamp
+    /// tokens so agreement and audio trimming operate on model-derived
+    /// boundaries rather than guessed wall-clock positions.
+    #[cfg(feature = "whisper")]
+    async fn transcribe_segments(
+        &self,
+        audio: AudioData,
+        timestamps: bool,
+    ) -> CResult<Vec<DecodedSegment>> {
         self.load_model().await?;
 
         let prepared = audio.prepare_for_whisper()?;
+        if prepared.samples.is_empty() {
+            return Ok(Vec::new());
+        }
+        let audio_duration_ms =
+            prepared.samples.len() as u64 * 1000 / streaming::WHISPER_SAMPLE_RATE as u64;
 
         debug!(
-            "Transcribing {} samples at {}Hz",
+            "Transcribing {} samples at {}Hz (timestamps={})",
             prepared.samples.len(),
-            prepared.sample_rate
+            prepared.sample_rate,
+            timestamps,
         );
 
         let mut state = self.model_state.write().await;
@@ -339,6 +509,16 @@ impl WhisperNode {
             &state.candle_device,
         )
         .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
+        // Candle's Whisper mel helper appends at least one 15-second zero
+        // chunk. Narrow to Whisper's fixed 30-second encoder input just like
+        // the upstream Candle examples; otherwise a full 30-second PCM window
+        // becomes 45 seconds of mel frames and exceeds the positional table.
+        let mel_frames = mel
+            .dim(2)
+            .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
+        let mel = mel
+            .narrow(2, 0, mel_frames.min(m::N_FRAMES))
+            .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
 
         debug!("Mel spectrogram shape: {:?}", mel.dims());
 
@@ -349,7 +529,11 @@ impl WhisperNode {
             .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
 
         let sot_token = Self::token_id(&state.tokenizer, m::SOT_TOKEN)?;
-        let transcribe_token = Self::token_id(&state.tokenizer, m::TRANSCRIBE_TOKEN)?;
+        let task_token = if self.config.task == "translate" {
+            Self::token_id(&state.tokenizer, m::TRANSLATE_TOKEN)?
+        } else {
+            Self::token_id(&state.tokenizer, m::TRANSCRIBE_TOKEN)?
+        };
         let eot_token = Self::token_id(&state.tokenizer, m::EOT_TOKEN)?;
         let no_timestamps_token = Self::token_id(&state.tokenizer, m::NO_TIMESTAMPS_TOKEN)?;
 
@@ -364,8 +548,11 @@ impl WhisperNode {
         if let Some(lang_token) = language_token {
             tokens.push(lang_token);
         }
-        tokens.push(transcribe_token);
-        tokens.push(no_timestamps_token);
+        tokens.push(task_token);
+        if !timestamps {
+            tokens.push(no_timestamps_token);
+        }
+        let sample_begin = tokens.len();
 
         let sample_len = state.config.max_target_positions / 2;
         for i in 0..sample_len {
@@ -397,28 +584,187 @@ impl WhisperNode {
                 .i(0)
                 .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
 
-            let logits_v: Vec<f32> = logits
+            let mut logits_v: Vec<f32> = logits
                 .to_vec1()
                 .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
+            for &token in &state.config.suppress_tokens {
+                if let Some(logit) = logits_v.get_mut(token as usize) {
+                    *logit = f32::NEG_INFINITY;
+                }
+            }
+            if timestamps {
+                if let Some(logit) = logits_v.get_mut(no_timestamps_token as usize) {
+                    *logit = f32::NEG_INFINITY;
+                }
+                Self::apply_timestamp_rules(
+                    &mut logits_v,
+                    &tokens,
+                    sample_begin,
+                    no_timestamps_token,
+                    eot_token,
+                );
+            }
             let next_token = logits_v
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
                 .map(|(i, _)| i as u32)
                 .unwrap_or(eot_token);
 
-            if next_token == eot_token || tokens.len() > state.config.max_target_positions {
+            tokens.push(next_token);
+            if next_token == eot_token || tokens.len() >= state.config.max_target_positions {
                 break;
             }
-            tokens.push(next_token);
         }
 
-        let text = state
-            .tokenizer
-            .decode(&tokens, true)
-            .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
+        if !timestamps {
+            let text = state
+                .tokenizer
+                .decode(&tokens, true)
+                .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
+            return Ok(vec![DecodedSegment {
+                text,
+                start_ms: 0,
+                end_ms: audio_duration_ms,
+            }]);
+        }
 
-        Ok(text)
+        let timestamp_begin = no_timestamps_token + 1;
+        let mut segments = Vec::new();
+        let mut text_tokens = Vec::new();
+        let mut segment_start_ms = 0u64;
+        for &token in &tokens[sample_begin..] {
+            if token == eot_token {
+                break;
+            }
+            if token >= timestamp_begin {
+                let timestamp_ms = ((token - timestamp_begin) as u64 * 20).min(audio_duration_ms);
+                if !text_tokens.is_empty() && timestamp_ms >= segment_start_ms {
+                    let text = state
+                        .tokenizer
+                        .decode(&text_tokens, true)
+                        .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
+                    if !text.trim().is_empty() {
+                        segments.push(DecodedSegment {
+                            text,
+                            start_ms: segment_start_ms,
+                            end_ms: timestamp_ms,
+                        });
+                    }
+                    text_tokens.clear();
+                }
+                segment_start_ms = timestamp_ms;
+            } else {
+                text_tokens.push(token);
+            }
+        }
+        if !text_tokens.is_empty() {
+            let text = state
+                .tokenizer
+                .decode(&text_tokens, true)
+                .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
+            if !text.trim().is_empty() {
+                segments.push(DecodedSegment {
+                    text,
+                    start_ms: segment_start_ms,
+                    end_ms: audio_duration_ms,
+                });
+            }
+        }
+
+        // A malformed/older tokenizer can occasionally produce text without a
+        // timestamp pair. Preserve the hypothesis, but keep it unstable until
+        // agreement or final flush rather than dropping useful speech.
+        if segments.is_empty() {
+            let text = state
+                .tokenizer
+                .decode(&tokens, true)
+                .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
+            if !text.trim().is_empty() {
+                segments.push(DecodedSegment {
+                    text,
+                    start_ms: 0,
+                    end_ms: audio_duration_ms,
+                });
+            }
+        }
+        Ok(segments)
+    }
+
+    #[cfg(feature = "whisper")]
+    fn apply_timestamp_rules(
+        logits: &mut [f32],
+        tokens: &[u32],
+        sample_begin: usize,
+        no_timestamps_token: u32,
+        eot_token: u32,
+    ) {
+        let timestamp_begin = no_timestamps_token + 1;
+        let vocab_size = logits.len() as u32;
+        let sampled = tokens.get(sample_begin..).unwrap_or_default();
+
+        if let Some(&last) = sampled.last() {
+            let last_was_timestamp = last >= timestamp_begin;
+            let penultimate_was_timestamp =
+                sampled.len() >= 2 && sampled[sampled.len() - 2] >= timestamp_begin;
+            if last_was_timestamp && penultimate_was_timestamp {
+                for token in timestamp_begin..vocab_size {
+                    logits[token as usize] = f32::NEG_INFINITY;
+                }
+            } else if last_was_timestamp {
+                for token in 0..eot_token {
+                    logits[token as usize] = f32::NEG_INFINITY;
+                }
+            }
+
+            if let Some(&last_timestamp) = sampled
+                .iter()
+                .rev()
+                .find(|&&token| token >= timestamp_begin)
+            {
+                let minimum = if last_was_timestamp && !penultimate_was_timestamp {
+                    last_timestamp
+                } else {
+                    last_timestamp.saturating_add(1)
+                };
+                for token in timestamp_begin..minimum.min(vocab_size) {
+                    logits[token as usize] = f32::NEG_INFINITY;
+                }
+            }
+        }
+
+        if tokens.len() == sample_begin {
+            for token in 0..timestamp_begin.min(vocab_size) {
+                logits[token as usize] = f32::NEG_INFINITY;
+            }
+        }
+
+        if timestamp_begin < vocab_size {
+            let timestamp_logits = &logits[timestamp_begin as usize..];
+            let max_timestamp = timestamp_logits
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let timestamp_logsumexp = if max_timestamp.is_finite() {
+                max_timestamp
+                    + timestamp_logits
+                        .iter()
+                        .map(|value| (*value - max_timestamp).exp())
+                        .sum::<f32>()
+                        .ln()
+            } else {
+                f32::NEG_INFINITY
+            };
+            let max_text = logits[..timestamp_begin as usize]
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            if timestamp_logsumexp > max_text {
+                for token in 0..timestamp_begin {
+                    logits[token as usize] = f32::NEG_INFINITY;
+                }
+            }
+        }
     }
 
     /// Get token ID from tokenizer
@@ -431,6 +777,18 @@ impl WhisperNode {
 
     #[cfg(not(feature = "whisper"))]
     async fn transcribe(&self, _audio: AudioData) -> CResult<String> {
+        Err(CandleNodeError::configuration(
+            "candle-whisper",
+            "Whisper feature not enabled at compile time",
+        ))
+    }
+
+    #[cfg(not(feature = "whisper"))]
+    async fn transcribe_segments(
+        &self,
+        _audio: AudioData,
+        _timestamps: bool,
+    ) -> CResult<Vec<DecodedSegment>> {
         Err(CandleNodeError::configuration(
             "candle-whisper",
             "Whisper feature not enabled at compile time",
@@ -482,10 +840,7 @@ impl StreamingNode for WhisperNodeWrapper {
         &self.node_id
     }
 
-    async fn initialize(
-        &self,
-        ctx: &dyn InitializeContextRead,
-    ) -> std::result::Result<(), Error> {
+    async fn initialize(&self, ctx: &dyn InitializeContextRead) -> std::result::Result<(), Error> {
         AsyncStreamingNode::initialize(&*self.inner, ctx).await
     }
 
@@ -511,6 +866,15 @@ impl StreamingNode for WhisperNodeWrapper {
 
     fn is_multi_input(&self) -> bool {
         false
+    }
+
+    async fn process_streaming_async(
+        &self,
+        data: RuntimeData,
+        ctx: &dyn NodeRuntimeContextRead,
+        callback: Box<dyn FnMut(RuntimeData) -> std::result::Result<(), Error> + Send>,
+    ) -> std::result::Result<usize, Error> {
+        AsyncStreamingNode::process_streaming_with_ctx(&*self.inner, data, ctx, callback).await
     }
 
     fn media_capabilities(&self) -> Option<MediaCapabilities> {
@@ -562,6 +926,10 @@ impl StreamingNodeFactory for WhisperNodeFactory {
         "candle-whisper"
     }
 
+    fn is_multi_output_streaming(&self) -> bool {
+        true
+    }
+
     fn media_capabilities(&self, _params: &Value) -> Option<MediaCapabilities> {
         Some(MediaCapabilities::with_input(MediaConstraints::Audio(
             AudioConstraints {
@@ -597,5 +965,32 @@ mod tests {
     fn test_factory_node_type() {
         let factory = WhisperNodeFactory::new();
         assert_eq!(factory.node_type(), "candle-whisper");
+        assert!(factory.is_multi_output_streaming());
+    }
+
+    #[test]
+    fn test_streaming_config_validation() {
+        let mut config = WhisperConfig::default();
+        assert!(config.validate().is_ok());
+
+        config.streaming_agreement_updates = 1;
+        assert!(config.validate().unwrap_err().contains("at least 2"));
+        config.streaming_agreement_updates = 2;
+        config.streaming_overlap_ms = config.streaming_max_window_ms;
+        assert!(config.validate().unwrap_err().contains("smaller"));
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn timestamp_rules_force_an_initial_timestamp() {
+        let no_timestamps = 10;
+        let mut logits = vec![1.0; 20];
+        WhisperNode::apply_timestamp_rules(&mut logits, &[1, 2], 2, no_timestamps, 9);
+        assert!(logits[..=no_timestamps as usize]
+            .iter()
+            .all(|value| value.is_infinite() && value.is_sign_negative()));
+        assert!(logits[(no_timestamps + 1) as usize..]
+            .iter()
+            .any(|value| value.is_finite()));
     }
 }
