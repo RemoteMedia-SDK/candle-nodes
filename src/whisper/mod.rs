@@ -322,11 +322,11 @@ impl WhisperNode {
                 let mut stream = self.streaming_state.lock().await;
                 (stream.decode_window(options, true), true)
             }
+            // Pass through unexpected data types (e.g. control messages)
+            // unchanged instead of erroring.
             other => {
-                return Err(Error::Execution(format!(
-                    "Whisper streaming accepts Audio or JSON flush, got {:?}",
-                    other.data_type()
-                )))
+                callback(other)?;
+                return Ok(1);
             }
         };
 
