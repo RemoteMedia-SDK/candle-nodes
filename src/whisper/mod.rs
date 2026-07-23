@@ -239,6 +239,16 @@ impl WhisperNode {
     /// User-supplied processing entry point. The `#[node]` macro
     /// generates the trait impl that delegates here.
     pub async fn process_impl(&self, data: RuntimeData) -> std::result::Result<RuntimeData, Error> {
+        tracing::info!("[Whisper] process_impl entered, type={:?}", data.data_type());
+        // Passthrough anything that isn't audio (e.g. ControlMessage emitted
+        // by upstream nodes such as the AudioBufferAccumulator). The streaming
+        // path already does this; mirror it here so the non-streaming path
+        // (used when config.streaming == false) doesn't reject the
+        // control_message the accumulator routes to this node.
+        if !matches!(data, RuntimeData::Audio { .. }) {
+            return Ok(data);
+        }
+
         // Extract metadata from input
         let input_metadata = match &data {
             RuntimeData::Audio { metadata, .. } => metadata.clone(),
@@ -288,6 +298,11 @@ impl WhisperNode {
     where
         F: FnMut(RuntimeData) -> std::result::Result<(), Error> + Send,
     {
+        tracing::info!(
+            "[Whisper] process_streaming_impl entered, streaming_config={}, type={:?}",
+            self.config.streaming,
+            data.data_type()
+        );
         if !self.config.streaming {
             callback(self.process_impl(data).await?)?;
             return Ok(1);
