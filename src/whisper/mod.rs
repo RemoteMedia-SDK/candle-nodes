@@ -144,10 +144,28 @@ pub struct WhisperNode {
     #[config(default = "transcribe".to_string())]
     pub task: String,
 
+    /// Optional initial prompt prepended to the decode context. Biases the
+    /// model toward specific vocabulary (e.g. a user's Steam library titles)
+    /// so names are transcribed correctly instead of phonetically. Empty/None
+    /// disables the bias. Tokens are appended right after the SOT/language/
+    /// task prefix (whisper's canonical initial-prompt slot) and before the
+    /// first decode step.
+    #[config(default = None)]
+    pub initial_prompt: Option<String>,
+
     /// Lazily-loaded model state (model + tokenizer + mel filters).
     /// Populated on first call to `initialize()` or `process_impl()`.
     #[state(default = RwLock::new(None))]
     model_state: RwLock<Option<WhisperModelState>>,
+
+    /// Optional runtime config override. When set (by `apply_param_update`,
+    /// driven by a `__param_update__` control frame), all live `self.config.*`
+    /// reads consult this instead of the statically-built `config`. Lets a
+    /// caller hot-swap model/language/device/task at runtime without a
+    /// full pipeline-graph rebuild — we just drop `model_state` and the
+    /// next frame reloads the model lazily.
+    #[state(default = RwLock::new(None))]
+    config_override: RwLock<Option<WhisperNodeConfig>>,
 
     /// Incremental audio, agreement, and revision state for this node instance.
     #[state(default = Mutex::new(WhisperStreamingState::default()))]
@@ -240,6 +258,18 @@ impl WhisperNode {
     /// generates the trait impl that delegates here.
     pub async fn process_impl(&self, data: RuntimeData) -> std::result::Result<RuntimeData, Error> {
         tracing::info!("[Whisper] process_impl entered, type={:?}", data.data_type());
+        // Runtime param-override control frame: consume it before the
+        // audio passthrough. On the single-output path there's no
+        // "consume" semantics, so echo an ack so the frame isn't
+        // silently dropped; downstream nodes will passthrough the ack.
+        // (The real consumption happens in process_streaming_impl.)
+        if let RuntimeData::Json(value) = &data {
+            if value.get("__param_update__").is_some() {
+                self.apply_param_update(value.get("__param_update__").unwrap()).await?;
+                return Ok(RuntimeData::Json(serde_json::json!({ "param_update": "ok" })));
+            }
+        }
+
         // Passthrough anything that isn't audio (e.g. ControlMessage emitted
         // by upstream nodes such as the AudioBufferAccumulator). The streaming
         // path already does this; mirror it here so the non-streaming path
@@ -276,14 +306,77 @@ impl WhisperNode {
         }
     }
 
-    fn streaming_options(&self) -> StreamingOptions {
-        StreamingOptions {
-            decode_interval_ms: self.config.streaming_decode_interval_ms,
-            overlap_ms: self.config.streaming_overlap_ms,
-            max_window_ms: self.config.streaming_max_window_ms,
-            agreement_updates: self.config.streaming_agreement_updates,
-            trailing_guard_words: self.config.streaming_trailing_guard_words,
+    /// Resolve the effective config: the runtime override if set,
+    /// otherwise the statically-built `config`.
+    async fn resolved_config(&self) -> WhisperNodeConfig {
+        self.config_override
+            .read()
+            .await
+            .clone()
+            .unwrap_or_else(|| self.config.clone())
+    }
+
+    /// Apply a runtime parameter update pushed as a `__param_update__` JSON
+    /// control frame. Parses model/language/device/task from the patch,
+    /// validates, commits the override, and drops `model_state` so the
+    /// next frame lazily reloads the (possibly new) model.
+    pub async fn apply_param_update(
+        &self,
+        patch: &Value,
+    ) -> std::result::Result<(), CandleNodeError> {
+        let mut base = self.resolved_config().await;
+
+        if let Some(v) = patch.get("model") {
+            base.model = serde_json::from_value(v.clone())
+                .map_err(|e| CandleNodeError::configuration("candle-whisper", format!("invalid model: {e}")))?;
         }
+        if let Some(v) = patch.get("language") {
+            base.language = serde_json::from_value(v.clone())
+                .map_err(|e| CandleNodeError::configuration("candle-whisper", format!("invalid language: {e}")))?;
+        }
+        if let Some(v) = patch.get("device") {
+            base.device = serde_json::from_value(v.clone())
+                .map_err(|e| CandleNodeError::configuration("candle-whisper", format!("invalid device: {e}")))?;
+        }
+        if let Some(v) = patch.get("task") {
+            base.task = serde_json::from_value(v.clone())
+                .map_err(|e| CandleNodeError::configuration("candle-whisper", format!("invalid task: {e}")))?;
+        }
+
+        base.validate()
+            .map_err(|e| CandleNodeError::configuration("candle-whisper", e))?;
+
+        *self.config_override.write().await = Some(base);
+        *self.model_state.write().await = None;
+
+        info!("[Whisper] runtime param override applied; model will reload on next frame");
+        Ok(())
+    }
+
+    fn streaming_options(&self) -> StreamingOptions {
+        let cfg = self.resolved_config_blocking();
+        StreamingOptions {
+            decode_interval_ms: cfg.streaming_decode_interval_ms,
+            overlap_ms: cfg.streaming_overlap_ms,
+            max_window_ms: cfg.streaming_max_window_ms,
+            agreement_updates: cfg.streaming_agreement_updates,
+            trailing_guard_words: cfg.streaming_trailing_guard_words,
+        }
+    }
+
+    /// Synchronous resolve for call sites that already hold no async
+    /// borrow (e.g. the sync `streaming_options`). Reads the override
+    /// if present, else the static config.
+    fn resolved_config_blocking(&self) -> WhisperNodeConfig {
+        // RwLock read is safe to await in an async fn, but
+        // `streaming_options` is sync; use a best-effort try-read and
+        // fall back to the static config if the lock is contended.
+        if let Some(g) = self.config_override.try_read() {
+            if let Some(cfg) = g.clone() {
+                return cfg;
+            }
+        }
+        self.config.clone()
     }
 
     /// Native incremental Whisper path used by in-tree and loadable runtimes.
@@ -313,6 +406,17 @@ impl WhisperNode {
         // revision numbers and local-agreement history.
         let _gate = self.streaming_gate.lock().await;
         let options = self.streaming_options();
+
+        // Runtime param-override control frame: consume it here (ahead
+        // of the audio arm and the `other =>` passthrough) so it
+        // never reaches downstream. Drops model_state; the next frame
+        // reloads the (possibly new) model lazily.
+        if let RuntimeData::Json(value) = &data {
+            if value.get("__param_update__").is_some() {
+                self.apply_param_update(value.get("__param_update__").unwrap()).await?;
+                return Ok(0);
+            }
+        }
 
         let (window, final_result) = match data {
             RuntimeData::Audio {
@@ -383,19 +487,18 @@ impl WhisperNode {
     /// Load model weights (lazy, idempotent).
     #[cfg(feature = "whisper")]
     async fn load_model(&self) -> CResult<()> {
-        let mut state = self.model_state.write().await;
-
-        if state.is_some() {
+        let resolved = self.resolved_config().await;
+        if resolved.model_state.is_some() {
             return Ok(());
         }
 
-        let device = self.select_device()?;
-        info!("Loading Whisper model: {} on {}", self.config.model, device);
+        let device = DeviceSelector::from_config(&resolved.device)?;
+        info!("Loading Whisper model: {} on {}", resolved.model, device);
 
         let cache = ModelCache::new();
 
         // Download model files if not cached
-        let model_id = self.config.model.model_id();
+        let model_id = resolved.model.model_id();
 
         let config_path = cache.download_model(model_id, "config.json", None).await?;
         let tokenizer_path = cache
@@ -543,8 +646,9 @@ impl WhisperNode {
             .forward(&mel, true)
             .map_err(|e| CandleNodeError::inference(NODE_TYPE, e.to_string()))?;
 
+        let resolved = self.resolved_config().await;
         let sot_token = Self::token_id(&state.tokenizer, m::SOT_TOKEN)?;
-        let task_token = if self.config.task == "translate" {
+        let task_token = if resolved.task == "translate" {
             Self::token_id(&state.tokenizer, m::TRANSLATE_TOKEN)?
         } else {
             Self::token_id(&state.tokenizer, m::TRANSCRIBE_TOKEN)?
@@ -552,8 +656,8 @@ impl WhisperNode {
         let eot_token = Self::token_id(&state.tokenizer, m::EOT_TOKEN)?;
         let no_timestamps_token = Self::token_id(&state.tokenizer, m::NO_TIMESTAMPS_TOKEN)?;
 
-        let language_token = if self.config.model.is_multilingual() {
-            let lang_str = format!("<|{}|>", self.config.language);
+        let language_token = if resolved.model.is_multilingual() {
+            let lang_str = format!("<|{}|>", resolved.language);
             Self::token_id(&state.tokenizer, &lang_str).ok()
         } else {
             None
@@ -566,6 +670,30 @@ impl WhisperNode {
         tokens.push(task_token);
         if !timestamps {
             tokens.push(no_timestamps_token);
+        }
+        // Initial-prompt bias: encode the prompt string into token ids and
+        // prepend them after the SOT/lang/task prefix (whisper's canonical
+        // initial-prompt slot) so the model is conditioned on the known
+        // vocabulary (e.g. a user's Steam library titles) before it begins
+        // decoding the audio. Truncate to a sane bound to avoid blowing the
+        // 448-token decoder context.
+        if let Some(prompt) = &self.config.initial_prompt {
+            let prompt = prompt.trim();
+            if !prompt.is_empty() {
+                match state.tokenizer.encode(prompt, false) {
+                    Ok(enc) => {
+                        const MAX_PROMPT_TOKENS: usize = 384;
+                        let mut ptoks = enc.get_ids().to_vec();
+                        if ptoks.len() > MAX_PROMPT_TOKENS {
+                            ptoks.truncate(MAX_PROMPT_TOKENS);
+                        }
+                        tokens.extend_from_slice(&ptoks);
+                    }
+                    Err(e) => {
+                        debug!("Failed to tokenize initial_prompt (ignored): {e}");
+                    }
+                }
+            }
         }
         let sample_begin = tokens.len();
 
