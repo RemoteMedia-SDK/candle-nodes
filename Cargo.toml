@@ -38,7 +38,13 @@ rubato = { version = "0.15" }
 
 # RemoteMedia core for StreamingNode trait
 # Enable multiprocess for inventory-based auto-registration
-remotemedia-core = { package = "remotemedia-sdk-base", git = "https://github.com/RemoteMedia-SDK/remotemedia-sdk-base", rev = "042a82fb46ad87c470211636d84f36326e574aa8", default-features = false, features = ["multiprocess"] }
+# Use the SAME in-tree source as whisper-service (path, not git) so both
+# crates link one copy of `remotemedia-sdk-base`. The in-tree
+# sdk/remotemedia-sdk-base is a shallow clone at rev 042a82fb (the rev this
+# used to pin), so this is an exact match and unifies the `StreamingNodeRegistry`
+# type that previously collided (whisper-service got the path copy, candle-nodes
+# got the git copy -> "two different versions" E0308 on register_candle_nodes).
+remotemedia-core = { package = "remotemedia-sdk-base", path = "../remotemedia-sdk-base", default-features = false, features = ["multiprocess"] }
 # Trait-surface and wire-data crates the `#[node]` macro expands to
 # absolute paths (`remotemedia_traits::...`, `remotemedia_types::...`).
 # Direct deps because the macro doesn't go through `remotemedia_core::`.

@@ -265,7 +265,9 @@ impl WhisperNode {
         // (The real consumption happens in process_streaming_impl.)
         if let RuntimeData::Json(value) = &data {
             if value.get("__param_update__").is_some() {
-                self.apply_param_update(value.get("__param_update__").unwrap()).await?;
+                self.apply_param_update(value.get("__param_update__").unwrap())
+                    .await
+                    .map_err(|e| Error::Execution(e.to_string()))?;
                 return Ok(RuntimeData::Json(serde_json::json!({ "param_update": "ok" })));
             }
         }
@@ -371,12 +373,13 @@ impl WhisperNode {
         // RwLock read is safe to await in an async fn, but
         // `streaming_options` is sync; use a best-effort try-read and
         // fall back to the static config if the lock is contended.
-        if let Some(g) = self.config_override.try_read() {
-            if let Some(cfg) = g.clone() {
-                return cfg;
-            }
-        }
-        self.config.clone()
+        // tokio::sync::RwLock::try_read returns Result<Guard, TryLockError>,
+        // so map it to Option first.
+        self.config_override
+            .try_read()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| self.config.clone())
     }
 
     /// Native incremental Whisper path used by in-tree and loadable runtimes.
@@ -413,7 +416,9 @@ impl WhisperNode {
         // reloads the (possibly new) model lazily.
         if let RuntimeData::Json(value) = &data {
             if value.get("__param_update__").is_some() {
-                self.apply_param_update(value.get("__param_update__").unwrap()).await?;
+                self.apply_param_update(value.get("__param_update__").unwrap())
+                    .await
+                    .map_err(|e| Error::Execution(e.to_string()))?;
                 return Ok(0);
             }
         }
@@ -487,10 +492,10 @@ impl WhisperNode {
     /// Load model weights (lazy, idempotent).
     #[cfg(feature = "whisper")]
     async fn load_model(&self) -> CResult<()> {
-        let resolved = self.resolved_config().await;
-        if resolved.model_state.is_some() {
+        if self.model_state.read().await.is_some() {
             return Ok(());
         }
+        let resolved = self.resolved_config().await;
 
         let device = DeviceSelector::from_config(&resolved.device)?;
         info!("Loading Whisper model: {} on {}", resolved.model, device);
@@ -538,7 +543,7 @@ impl WhisperNode {
 
         info!("Whisper model loaded successfully");
 
-        *state = Some(WhisperModelState {
+        *self.model_state.write().await = Some(WhisperModelState {
             candle_device,
             model,
             tokenizer,
