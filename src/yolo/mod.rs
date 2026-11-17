@@ -419,7 +419,10 @@ impl YoloNode {
 
         // Convert to RGB if needed
         let rgb_frame = video.to_rgb24()?;
-        let input_size = self.config.model.input_size();
+        // `letterbox_resize` pads onto a square canvas, and every YoloModel
+        // input is square (640x640), so one side is the canvas size.
+        let (input_size, input_height) = self.config.model.input_size();
+        debug_assert_eq!(input_size, input_height, "YOLO input must be square");
 
         debug!(
             "Running YOLO detection on {}x{} frame (resizing to {})",
@@ -436,7 +439,7 @@ impl YoloNode {
 
         // 1. Preprocess: letterbox resize to model input size
         let (resized, scale_x, scale_y, pad_x, pad_y) = YoloPreprocessor::letterbox_resize(
-            &rgb_frame.data,
+            &rgb_frame.pixel_data,
             rgb_frame.width,
             rgb_frame.height,
             input_size,
@@ -457,7 +460,7 @@ impl YoloNode {
         let mut detections: Vec<Detection> = vec![];
 
         // 4. Apply NMS filtering
-        NMS::apply(&mut detections, self.config.iou_threshold);
+        NMS::apply(&mut detections, self.config.nms_threshold);
 
         let inference_time_ms = start.elapsed().as_secs_f32() * 1000.0;
 
