@@ -46,7 +46,7 @@ impl RuntimeDataConverter {
                 format,
                 ..
             } => Ok(VideoData {
-                pixel_data: pixel_data.clone(),
+                pixel_data: pixel_data.to_vec(),
                 width: *width,
                 height: *height,
                 format: format.clone(),

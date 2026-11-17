@@ -239,7 +239,7 @@ impl EmotionExtractorNode {
             let tensor_data: Vec<u8> = diff.iter().flat_map(|&x| x.to_le_bytes()).collect();
 
             outputs.push(RuntimeData::Tensor {
-                data: tensor_data,
+                data: tensor_data.into(),
                 shape: vec![diff.len() as i32],
                 dtype: 0, // float32
                 metadata: Some(serde_json::json!({
@@ -590,7 +590,7 @@ mod tests {
             .collect();
 
         let tensor = RuntimeData::Tensor {
-            data: bytes,
+            data: bytes.into(),
             shape: vec![2],
             dtype: 0,
             metadata: None,
