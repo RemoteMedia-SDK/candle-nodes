@@ -13,12 +13,12 @@ use crate::device::{DeviceSelector, InferenceDevice};
 use crate::error::{CandleNodeError, Result};
 
 use async_trait::async_trait;
-use remotemedia_core::capabilities::{
+use remotemedia_traits::capabilities::{
     AudioConstraints, CapabilityBehavior, ConstraintValue, MediaCapabilities, MediaConstraints,
 };
-use remotemedia_core::data::RuntimeData;
-use remotemedia_core::nodes::streaming_node::{AsyncStreamingNode, InitializeContextRead, NodeRuntimeContextRead, StreamingNode, StreamingNodeFactory};
-use remotemedia_core::Error;
+use remotemedia_types::RuntimeData;
+use remotemedia_traits::{AsyncStreamingNode, InitializeContextRead, NodeRuntimeContextRead, StreamingNode, StreamingNodeFactory};
+use remotemedia_types::Error;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;

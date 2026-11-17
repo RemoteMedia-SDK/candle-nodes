@@ -3,7 +3,7 @@
 //! Provides conversion between RemoteMedia RuntimeData types and Candle tensors.
 
 use crate::error::{CandleNodeError, Result};
-use remotemedia_core::data_compat::RuntimeData;
+use remotemedia_types::RuntimeData;
 
 /// Extension trait for tensor operations
 pub trait TensorExt {
@@ -178,13 +178,13 @@ pub struct VideoData {
     pub pixel_data: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub format: remotemedia_core::data_compat::PixelFormat,
+    pub format: remotemedia_types::PixelFormat,
 }
 
 impl VideoData {
     /// Convert to RGB24 format if needed
     pub fn to_rgb24(&self) -> Result<Self> {
-        use remotemedia_core::data_compat::PixelFormat;
+        use remotemedia_types::PixelFormat;
 
         match self.format {
             PixelFormat::Rgb24 => Ok(self.clone()),

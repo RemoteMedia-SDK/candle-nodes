@@ -56,7 +56,7 @@ pub use cli::{list_available_models, ModelCli};
 pub use convert::{RuntimeDataConverter, TensorExt};
 pub use device::{DeviceSelector, InferenceDevice};
 pub use error::{CandleNodeError, Result};
-pub use registry::{register_candle_nodes, CandleNodeFactory, CandleNodesProvider};
+pub use registry::{candle_node_factories, CandleNodeFactory, CandleNodesProvider};
 pub use schema::{all_schemas, export_schemas_json, MediaType, NodeSchema};
 
 #[cfg(feature = "whisper")]

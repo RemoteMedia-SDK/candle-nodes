@@ -29,15 +29,15 @@ use crate::error::{CandleNodeError, Result};
 
 use async_trait::async_trait;
 use ndarray::{Array1, Array2, Array3, Array4, s};
-use remotemedia_core::capabilities::{
+use remotemedia_traits::capabilities::{
     AudioConstraints, CapabilityBehavior, ConstraintValue, MediaCapabilities, MediaConstraints,
 };
-use remotemedia_core::data::RuntimeData;
-use remotemedia_core::nodes::streaming_node::{
+use remotemedia_types::RuntimeData;
+use remotemedia_traits::{
     AsyncStreamingNode, InitializeContextRead, NodeRuntimeContextRead, StreamingNode,
     StreamingNodeFactory,
 };
-use remotemedia_core::Error;
+use remotemedia_types::Error;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::Arc;

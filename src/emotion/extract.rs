@@ -32,10 +32,10 @@ use super::vector_io::{l2_normalize, subtract_vectors};
 use crate::error::{CandleNodeError, Result};
 use crate::{DeviceSelector, InferenceDevice};
 use async_trait::async_trait;
-use remotemedia_core::capabilities::CapabilityBehavior;
-use remotemedia_core::data_compat::RuntimeData;
-use remotemedia_core::nodes::streaming_node::{AsyncStreamingNode, InitializeContextRead, NodeRuntimeContextRead, StreamingNode, StreamingNodeFactory};
-use remotemedia_core::Error;
+use remotemedia_traits::capabilities::CapabilityBehavior;
+use remotemedia_types::RuntimeData;
+use remotemedia_traits::{AsyncStreamingNode, InitializeContextRead, NodeRuntimeContextRead, StreamingNode, StreamingNodeFactory};
+use remotemedia_types::Error;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -525,8 +525,8 @@ impl StreamingNodeFactory for EmotionExtractorNodeFactory {
         true
     }
 
-    fn schema(&self) -> Option<remotemedia_core::nodes::schema::NodeSchema> {
-        use remotemedia_core::nodes::schema::{
+    fn schema(&self) -> Option<remotemedia_traits::schema::NodeSchema> {
+        use remotemedia_traits::schema::{
             LatencyClass, NodeCapabilitiesSchema, NodeSchema, RuntimeDataType,
         };
         Some(
