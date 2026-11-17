@@ -15,7 +15,6 @@
 //!   `WhisperNode` through `plugin_export!()`.
 
 mod model;
-mod streaming;
 
 pub use model::{WhisperModel, WhisperModelExt};
 
@@ -28,7 +27,10 @@ use crate::error::CandleNodeError;
 // generic two-arg `Result` at the `#[node]` macro expansion site
 // (the macro emits `Result<RuntimeData, Error>` in absolute paths
 // and a 1-arg shadowed `Result` makes that look like a misuse).
-use self::streaming::{DecodedSegment, StreamingOptions, WhisperStreamingState};
+use remotemedia_traits::stt::{
+    DecodedSegment, StreamingOptions, TranscriptStreamingConfig, WhisperStreamingState,
+    WHISPER_SAMPLE_RATE,
+};
 use crate::error::Result as CResult;
 
 use async_trait::async_trait;
@@ -43,6 +45,7 @@ use remotemedia_core::nodes::streaming_node::{
 };
 use remotemedia_core::Error;
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
@@ -140,6 +143,17 @@ pub struct WhisperNode {
     #[config(default = 2)]
     pub streaming_trailing_guard_words: usize,
 
+    /// The shared transcript events every STT node emits
+    /// (`remotemedia_modality::stt`): `delta` / `correction` / `final` per
+    /// utterance. `off` (the default) keeps this node's own output: the
+    /// deprecated `partial` / `correction` / `final` events when `streaming`
+    /// is on, plain text otherwise. With a mode other than `off`, this
+    /// object's `agreement_updates` / `trailing_guard_tokens` replace the
+    /// `streaming_agreement_updates` / `streaming_trailing_guard_words` above.
+    #[config(default = TranscriptStreamingConfig::default())]
+    #[serde(rename = "transcript_updates", alias = "transcriptUpdates")]
+    pub transcript_updates: TranscriptStreamingConfig,
+
     /// Task: "transcribe" or "translate".
     #[config(default = "transcribe".to_string())]
     pub task: String,
@@ -174,6 +188,10 @@ pub struct WhisperNode {
     /// Serializes streaming state transitions across concurrent input arrivals.
     #[state(default = Mutex::new(()))]
     streaming_gate: Mutex<()>,
+
+    /// Set once the deprecation of the node's own streaming events is logged.
+    #[state(default = AtomicBool::new(false))]
+    legacy_events_warned: AtomicBool,
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +244,15 @@ impl WhisperNodeConfig {
         if self.streaming_agreement_updates < 2 {
             return Err("streaming_agreement_updates must be at least 2".to_string());
         }
+        self.transcript_updates
+            .validate()
+            .map_err(|e| format!("invalid transcript_updates: {e}"))?;
         Ok(())
+    }
+
+    /// Whether the shared transcript events are on.
+    pub fn shared_updates(&self) -> bool {
+        !self.transcript_updates.mode.is_off()
     }
 }
 
@@ -357,12 +383,23 @@ impl WhisperNode {
 
     fn streaming_options(&self) -> StreamingOptions {
         let cfg = self.resolved_config_blocking();
+        let updates = &cfg.transcript_updates;
+        let shared = cfg.shared_updates();
         StreamingOptions {
             decode_interval_ms: cfg.streaming_decode_interval_ms,
             overlap_ms: cfg.streaming_overlap_ms,
             max_window_ms: cfg.streaming_max_window_ms,
-            agreement_updates: cfg.streaming_agreement_updates,
-            trailing_guard_words: cfg.streaming_trailing_guard_words,
+            agreement_updates: if shared {
+                updates.agreement_updates
+            } else {
+                cfg.streaming_agreement_updates
+            },
+            trailing_guard_words: if shared {
+                updates.trailing_guard_tokens
+            } else {
+                cfg.streaming_trailing_guard_words
+            },
+            transcript_updates: updates.mode,
         }
     }
 
@@ -385,6 +422,12 @@ impl WhisperNode {
     /// Native incremental Whisper path used by in-tree and loadable runtimes.
     /// Audio inputs contain only new PCM; JSON `{ "type": "flush" }`
     /// finalizes the latest hypothesis.
+    ///
+    /// The rolling window and the stabilization are the shared
+    /// `remotemedia_traits::stt::WhisperStreamingState`, which drives the
+    /// model-agnostic `TranscriptStabilizer`. With `transcript_updates` on,
+    /// the node emits its `delta` / `correction` / `final` events. With it
+    /// off and `streaming` on, it emits the deprecated legacy events.
     pub async fn process_streaming_impl<F>(
         &self,
         data: RuntimeData,
@@ -399,9 +442,17 @@ impl WhisperNode {
             self.config.streaming,
             data.data_type()
         );
-        if !self.config.streaming {
+        let shared = self.config.shared_updates();
+        if !self.config.streaming && !shared {
             callback(self.process_impl(data).await?)?;
             return Ok(1);
+        }
+        if !shared && !self.legacy_events_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "[Whisper] the partial/correction/final events with stable_text/unstable_text \
+                 are deprecated; set transcript_updates.mode to \"full\" for the shared \
+                 delta/correction/final events every STT node emits"
+            );
         }
 
         // The trait permits concurrent arrivals. Keep audio mutation, decode,
@@ -465,7 +516,7 @@ impl WhisperNode {
 
         let audio = AudioData {
             samples: window.samples,
-            sample_rate: streaming::WHISPER_SAMPLE_RATE,
+            sample_rate: WHISPER_SAMPLE_RATE,
             channels: 1,
         };
         let segments = self
@@ -473,12 +524,19 @@ impl WhisperNode {
             .await
             .map_err(|e| Error::Execution(e.to_string()))?;
 
-        let event = self.streaming_state.lock().await.apply_hypothesis(
-            segments,
-            window.start_ms,
-            options,
-            final_result,
-        );
+        let (event, updates) = {
+            let mut stream = self.streaming_state.lock().await;
+            let event = stream.apply_hypothesis(segments, window.start_ms, options, final_result);
+            // Drained in both modes; with `off` it holds only the final.
+            (event, stream.take_updates())
+        };
+        if shared {
+            let count = updates.len();
+            for update in updates {
+                callback(RuntimeData::Json(update.to_json()))?;
+            }
+            return Ok(count);
+        }
         if let Some(event) = event {
             callback(RuntimeData::Json(serde_json::to_value(event).map_err(
                 |e| Error::Execution(format!("serialize transcript event: {e}")),
@@ -606,7 +664,7 @@ impl WhisperNode {
             return Ok(Vec::new());
         }
         let audio_duration_ms =
-            prepared.samples.len() as u64 * 1000 / streaming::WHISPER_SAMPLE_RATE as u64;
+            prepared.samples.len() as u64 * 1000 / WHISPER_SAMPLE_RATE as u64;
 
         debug!(
             "Transcribing {} samples at {}Hz (timestamps={})",
@@ -1096,6 +1154,92 @@ impl StreamingNodeFactory for WhisperNodeFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use remotemedia_traits::stt::{TranscriptStreamingMode, TranscriptUpdate};
+
+    fn config(params: serde_json::Value) -> WhisperConfig {
+        let cfg = WhisperConfig::from_json(&params).unwrap();
+        cfg.validate().unwrap();
+        cfg
+    }
+
+    #[test]
+    fn transcript_updates_default_off() {
+        let cfg = config(serde_json::json!({}));
+        assert_eq!(cfg.transcript_updates.mode, TranscriptStreamingMode::Off);
+        assert!(!cfg.shared_updates());
+    }
+
+    #[test]
+    fn transcript_updates_accepts_the_shared_key_and_the_camel_case_alias() {
+        for key in ["transcript_updates", "transcriptUpdates"] {
+            let cfg = config(serde_json::json!({ key: { "mode": "full" } }));
+            assert_eq!(cfg.transcript_updates.mode, TranscriptStreamingMode::Full, "{key}");
+            assert!(cfg.shared_updates());
+        }
+    }
+
+    #[test]
+    fn transcript_updates_is_validated() {
+        let cfg = WhisperConfig::from_json(&serde_json::json!({
+            "transcript_updates": { "mode": "full", "agreement_updates": 0 }
+        }))
+        .unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("transcript_updates"), "{err}");
+    }
+
+    #[test]
+    fn shared_mode_takes_agreement_from_transcript_updates() {
+        let shared = WhisperNode::new(config(serde_json::json!({
+            "streamingAgreementUpdates": 3,
+            "transcript_updates": { "mode": "stable", "agreement_updates": 1, "trailing_guard_tokens": 0 }
+        })));
+        let options = shared.streaming_options();
+        assert_eq!(options.transcript_updates, TranscriptStreamingMode::Stable);
+        assert_eq!(options.agreement_updates, 1);
+        assert_eq!(options.trailing_guard_words, 0);
+
+        let legacy = WhisperNode::new(config(serde_json::json!({ "streamingAgreementUpdates": 3 })));
+        let options = legacy.streaming_options();
+        assert_eq!(options.transcript_updates, TranscriptStreamingMode::Off);
+        assert_eq!(options.agreement_updates, 3);
+    }
+
+    /// The node's options drive the shared state: in `full` mode it yields
+    /// the shared events, ending in one `final` with the committed text.
+    #[test]
+    fn full_mode_yields_shared_events_through_the_node_options() {
+        let node = WhisperNode::new(config(serde_json::json!({
+            "streamingDecodeIntervalMs": 1000,
+            "transcript_updates": { "mode": "full" }
+        })));
+        let options = node.streaming_options();
+        let mut state = WhisperStreamingState::default();
+        let segment = |text: &str, end_ms| DecodedSegment {
+            text: text.to_string(),
+            start_ms: 0,
+            end_ms,
+        };
+
+        state.push_audio(&vec![0.0; 16_000], 16_000, 1).unwrap();
+        let window = state.decode_window(options, false).expect("one second of audio");
+        state.apply_hypothesis(vec![segment("turn on the", 900)], window.start_ms, options, false);
+        let first = state.take_updates();
+        assert!(matches!(first.first(), Some(TranscriptUpdate::Delta(_))), "{first:?}");
+
+        state.push_audio(&vec![0.0; 16_000], 16_000, 1).unwrap();
+        let window = state.decode_window(options, true).expect("forced window");
+        state.apply_hypothesis(vec![segment("turn on the lights", 1900)], window.start_ms, options, true);
+        let last = state.take_updates();
+        let final_text = last.iter().find_map(|update| match update {
+            TranscriptUpdate::Final(f) => Some(f.text.clone()),
+            _ => None,
+        });
+        assert_eq!(final_text.as_deref(), Some("turn on the lights"));
+        for update in first.iter().chain(&last) {
+            assert!(update.to_json()["type"].is_string());
+        }
+    }
 
     #[test]
     fn test_whisper_config_default() {

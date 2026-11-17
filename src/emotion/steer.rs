@@ -712,7 +712,7 @@ mod tests {
             .collect();
 
         let tensor = RuntimeData::Tensor {
-            data: bytes,
+            data: bytes.into(),
             shape: vec![3],
             dtype: 0,
             metadata: Some(serde_json::json!({"emotion": "happy"})),
@@ -738,7 +738,7 @@ mod tests {
             .collect();
 
         let tensor = RuntimeData::Tensor {
-            data: bytes,
+            data: bytes.into(),
             shape: vec![4],
             dtype: 0,
             metadata: Some(serde_json::json!({"emotion": "happy"})),

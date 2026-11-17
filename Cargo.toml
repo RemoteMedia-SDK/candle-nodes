@@ -48,8 +48,8 @@ remotemedia-core = { package = "remotemedia-sdk-base", path = "../remotemedia-sd
 # Trait-surface and wire-data crates the `#[node]` macro expands to
 # absolute paths (`remotemedia_traits::...`, `remotemedia_types::...`).
 # Direct deps because the macro doesn't go through `remotemedia_core::`.
-remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "b0c04076f2e6432c448c69a59d0ee577f15b8662" }
-remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "b0c04076f2e6432c448c69a59d0ee577f15b8662" }
+remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "740b847f252551acd6f22156e6fb46a680b97659" }
+remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "740b847f252551acd6f22156e6fb46a680b97659" }
 
 # Utilities
 dirs = { version = "5.0" }
@@ -63,7 +63,7 @@ inventory = { version = "0.3" }
 # cargo feature is enabled). This is what flips the `#[node]` macro's
 # conditional FFI emission on, so a wrapper cdylib can re-export
 # WhisperNode through `plugin_export!()` without forking the source.
-remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "b0c04076f2e6432c448c69a59d0ee577f15b8662", optional = true }
+remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "740b847f252551acd6f22156e6fb46a680b97659", optional = true }
 abi_stable             = { version = "0.11", optional = true }
 
 [dev-dependencies]
@@ -108,3 +108,16 @@ name = "vad_test"
 required-features = ["vad"]
 
 
+
+# Build against the sibling remotemedia-plugin-sdk checkout, as
+# remotemedia-sdk-base (the path dependency above) and the `whisper` plugin
+# repository do. Without it, base and this crate resolve two different copies
+# of remotemedia-traits / remotemedia-types.
+[patch."https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"]
+loadable-node-abi = { path = "../remotemedia-plugin-sdk/crates/loadable-node-abi" }
+remotemedia-types = { path = "../remotemedia-plugin-sdk/crates/types" }
+remotemedia-traits = { path = "../remotemedia-plugin-sdk/crates/traits" }
+remotemedia-py-env = { path = "../remotemedia-plugin-sdk/crates/py-env-manager" }
+remotemedia-plugin-sdk = { path = "../remotemedia-plugin-sdk/crates/plugin-sdk" }
+remotemedia-modality = { path = "../remotemedia-plugin-sdk/crates/modality" }
+remotemedia-core-derive = { path = "../remotemedia-plugin-sdk/crates/core-derive" }
