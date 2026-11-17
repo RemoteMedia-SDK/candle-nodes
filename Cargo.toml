@@ -38,13 +38,12 @@ rubato = { version = "0.15" }
 
 # RemoteMedia core for StreamingNode trait
 # Enable multiprocess for inventory-based auto-registration
-# Use the SAME in-tree source as whisper-service (path, not git) so both
-# crates link one copy of `remotemedia-sdk-base`. The in-tree
-# sdk/remotemedia-sdk-base is a shallow clone at rev 042a82fb (the rev this
-# used to pin), so this is an exact match and unifies the `StreamingNodeRegistry`
-# type that previously collided (whisper-service got the path copy, candle-nodes
-# got the git copy -> "two different versions" E0308 on register_candle_nodes).
-remotemedia-core = { package = "remotemedia-sdk-base", path = "../remotemedia-sdk-base", default-features = false, features = ["multiprocess"] }
+# A git rev, so this crate also builds as a git dependency (the `whisper`
+# plugin's release build checks out only its own repository). It pins the
+# same remotemedia-plugin-sdk rev as the crates below, so the build has one
+# copy of remotemedia-traits / remotemedia-types. Local builds use the
+# sibling checkout through the [patch] at the end of this file.
+remotemedia-core = { package = "remotemedia-sdk-base", git = "https://github.com/RemoteMedia-SDK/remotemedia-sdk-base", rev = "cf4e5195b23b251d0365279c005bc8c18f1e35cc", default-features = false, features = ["multiprocess"] }
 # Trait-surface and wire-data crates the `#[node]` macro expands to
 # absolute paths (`remotemedia_traits::...`, `remotemedia_types::...`).
 # Direct deps because the macro doesn't go through `remotemedia_core::`.
@@ -109,10 +108,14 @@ required-features = ["vad"]
 
 
 
-# Build against the sibling remotemedia-plugin-sdk checkout, as
-# remotemedia-sdk-base (the path dependency above) and the `whisper` plugin
-# repository do. Without it, base and this crate resolve two different copies
-# of remotemedia-traits / remotemedia-types.
+# Local development builds against the sibling checkouts. These patches
+# apply only when this crate is the root; a consumer that takes it as a git
+# dependency (the `whisper` plugin's release build) resolves the git revs.
+[patch."https://github.com/RemoteMedia-SDK/remotemedia-sdk-base"]
+remotemedia-sdk-base = { path = "../remotemedia-sdk-base" }
+
+# The sibling remotemedia-plugin-sdk checkout, as remotemedia-sdk-base's own
+# workspace patches it, so base and this crate share one copy.
 [patch."https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"]
 loadable-node-abi = { path = "../remotemedia-plugin-sdk/crates/loadable-node-abi" }
 remotemedia-types = { path = "../remotemedia-plugin-sdk/crates/types" }
