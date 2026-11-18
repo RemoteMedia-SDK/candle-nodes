@@ -21,10 +21,10 @@ use crate::device::{DeviceSelector, InferenceDevice};
 use crate::error::{CandleNodeError, Result};
 
 use async_trait::async_trait;
-use remotemedia_core::capabilities::CapabilityBehavior;
-use remotemedia_core::data_compat::RuntimeData;
-use remotemedia_core::nodes::streaming_node::{AsyncStreamingNode, InitializeContext, InitializeContextRead, NodeRuntimeContextRead, StreamingNode, StreamingNodeFactory};
-use remotemedia_core::Error;
+use remotemedia_traits::capabilities::CapabilityBehavior;
+use remotemedia_types::RuntimeData;
+use remotemedia_traits::{AsyncStreamingNode, InitializeContextRead, NodeRuntimeContextRead, StreamingNode, StreamingNodeFactory};
+use remotemedia_types::Error;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -318,7 +318,7 @@ impl AsyncStreamingNode for PhiNode {
         if let RuntimeData::ControlMessage { message_type, .. } = message {
             if matches!(
                 message_type,
-                remotemedia_core::data_compat::ControlMessageType::CancelSpeculation { .. }
+                remotemedia_types::ControlMessageType::CancelSpeculation { .. }
             ) {
                 debug!("Received cancel message for Phi generation");
                 return Ok(true);
@@ -381,7 +381,7 @@ impl AsyncStreamingNode for LlamaNode {
         if let RuntimeData::ControlMessage { message_type, .. } = message {
             if matches!(
                 message_type,
-                remotemedia_core::data_compat::ControlMessageType::CancelSpeculation { .. }
+                remotemedia_types::ControlMessageType::CancelSpeculation { .. }
             ) {
                 debug!("Received cancel message for LLaMA generation");
                 return Ok(true);

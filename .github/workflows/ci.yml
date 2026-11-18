@@ -69,6 +69,15 @@ jobs:
         with:
           cache-on-failure: true
 
+      # candle-onnx (vad, eou) compiles its ONNX protobufs with prost-build,
+      # which runs a protoc executable. protox, the pure-Rust compiler
+      # remotemedia-sdk-base uses, takes the same flags, so it stands in
+      # through PROTOC: no protoc package. rust-cache keeps the binary.
+      - name: Install protox (protoc stand-in)
+        run: |
+          cargo install protox --version 0.10.0 --features bin --locked
+          echo "PROTOC=$HOME/.cargo/bin/protox" >> "$GITHUB_ENV"
+
       # yolo, llm and eou have no consumer in the workspace, so this is the
       # only thing that builds them. It covers whisper and vad too.
       - name: cargo check (all models)

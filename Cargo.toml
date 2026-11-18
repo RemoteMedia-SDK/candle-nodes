@@ -36,19 +36,13 @@ ndarray = { version = "0.16", optional = true }
 # Audio processing for Whisper
 rubato = { version = "0.15" }
 
-# RemoteMedia core for StreamingNode trait
-# Enable multiprocess for inventory-based auto-registration
-# A git rev, so this crate also builds as a git dependency (the `whisper`
-# plugin's release build checks out only its own repository). It pins the
-# same remotemedia-plugin-sdk rev as the crates below, so the build has one
-# copy of remotemedia-traits / remotemedia-types. Local builds use the
-# sibling checkout through the [patch] at the end of this file.
-remotemedia-core = { package = "remotemedia-sdk-base", git = "https://github.com/RemoteMedia-SDK/remotemedia-sdk-base", rev = "cf4e5195b23b251d0365279c005bc8c18f1e35cc", default-features = false, features = ["multiprocess"] }
-# Trait-surface and wire-data crates the `#[node]` macro expands to
-# absolute paths (`remotemedia_traits::...`, `remotemedia_types::...`).
-# Direct deps because the macro doesn't go through `remotemedia_core::`.
-remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "740b847f252551acd6f22156e6fb46a680b97659" }
-remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "740b847f252551acd6f22156e6fb46a680b97659" }
+# The plugin SDK crates: the node traits, the wire data types, the `#[node]`
+# macro, and `NodeFactoryProvider`, through which a host that links this
+# crate registers its nodes. This crate does not depend on
+# remotemedia-sdk-base, so neither do plugins built from it.
+remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "48e41429bafec472f4063127eb27d214ab42e659" }
+remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "48e41429bafec472f4063127eb27d214ab42e659" }
+remotemedia-core-derive = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "48e41429bafec472f4063127eb27d214ab42e659" }
 
 # Utilities
 dirs = { version = "5.0" }
@@ -62,10 +56,13 @@ inventory = { version = "0.3" }
 # cargo feature is enabled). This is what flips the `#[node]` macro's
 # conditional FFI emission on, so a wrapper cdylib can re-export
 # WhisperNode through `plugin_export!()` without forking the source.
-remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "740b847f252551acd6f22156e6fb46a680b97659", optional = true }
+remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "48e41429bafec472f4063127eb27d214ab42e659", optional = true }
 abi_stable             = { version = "0.11", optional = true }
 
 [dev-dependencies]
+# Host-side context for the examples and integration tests only. Dev
+# dependencies do not reach crates that depend on this one.
+remotemedia-core = { package = "remotemedia-sdk-base", git = "https://github.com/RemoteMedia-SDK/remotemedia-sdk-base", rev = "d33623f2c5912335faabf47b70708f10e806dc15", default-features = false, features = ["multiprocess"] }
 tokio-test = { version = "0.4" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = { version = "3.8" }

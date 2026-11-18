@@ -66,7 +66,7 @@ pub enum CandleNodeError {
 
     /// RemoteMedia core error
     #[error("Core error: {0}")]
-    Core(#[from] remotemedia_core::Error),
+    Core(#[from] remotemedia_types::Error),
 }
 
 impl CandleNodeError {

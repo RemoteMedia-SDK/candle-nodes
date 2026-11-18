@@ -4059,6 +4059,7 @@ dependencies = [
  "inventory",
  "ndarray",
  "rand 0.8.6",
+ "remotemedia-core-derive",
  "remotemedia-plugin-sdk",
  "remotemedia-sdk-base",
  "remotemedia-traits",
