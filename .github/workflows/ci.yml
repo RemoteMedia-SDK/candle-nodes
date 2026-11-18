@@ -1,8 +1,7 @@
 name: CI
 
-# Checks every model feature, so the ones no consumer enables (yolo, llm,
-# eou) keep compiling, and runs the unit tests for the features the
-# `whisper` plugin ships.
+# Checks and unit-tests every model feature, so the ones no consumer
+# enables (yolo, llm, eou) keep compiling and their tests keep passing.
 #
 # Cargo.toml [patch]es remotemedia-sdk-base and remotemedia-plugin-sdk to
 # sibling checkouts (../remotemedia-sdk-base, ../remotemedia-plugin-sdk), as
@@ -83,5 +82,6 @@ jobs:
       - name: cargo check (all models)
         run: cargo check --locked --lib --features all-models
 
-      - name: cargo test (whisper, vad, loadable-export)
-        run: cargo test --locked --lib --features whisper,vad,loadable-export
+      # loadable-export is what the `whisper` plugin builds with.
+      - name: cargo test (all models, loadable-export)
+        run: cargo test --locked --lib --features all-models,loadable-export

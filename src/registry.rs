@@ -105,7 +105,7 @@ pub fn list_candle_node_types() -> Vec<&'static str> {
     }
 
     #[cfg(feature = "vad")]
-    types.push("candle-silero-vad");
+    types.push("silero-vad");
 
     #[cfg(feature = "eou")]
     types.push("parakeet-eou");
@@ -125,7 +125,8 @@ pub fn is_candle_node(node_type: &str) -> bool {
             | "candle-yolo"
             | "candle-phi"
             | "candle-llama"
-            | "candle-silero-vad"
+            | "silero-vad"
+            | "parakeet-eou"
             | "EmotionExtractorNode"
             | "EmotionSteeringNode"
     )
@@ -135,11 +136,26 @@ pub fn is_candle_node(node_type: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The listed types are exactly the types the enabled factories create,
+    /// so a node added to one list and not the other fails here.
     #[test]
     fn test_list_node_types() {
-        let types = list_candle_node_types();
-        // At minimum, should be empty if no features enabled
-        assert!(types.len() <= 5);
+        let mut listed = list_candle_node_types();
+        let mut created: Vec<String> = candle_node_factories()
+            .iter()
+            .map(|factory| factory.node_type().to_string())
+            .collect();
+        listed.sort_unstable();
+        created.sort_unstable();
+        assert_eq!(listed, created);
+    }
+
+    /// `is_candle_node` names every node type, whatever the enabled features.
+    #[test]
+    fn every_listed_type_is_a_candle_node() {
+        for node_type in list_candle_node_types() {
+            assert!(is_candle_node(node_type), "{node_type}");
+        }
     }
 
     #[test]
