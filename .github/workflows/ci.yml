@@ -58,17 +58,25 @@ jobs:
           clone remotemedia-sdk-base
           clone remotemedia-plugin-sdk
 
-      # protobuf-compiler: candle-onnx (vad, eou) runs protoc in its build script.
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config nasm libclang-dev libssl-dev protobuf-compiler
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config nasm libclang-dev libssl-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+
+      # candle-onnx (vad, eou) compiles its ONNX protobufs with prost-build,
+      # which runs a protoc executable. protox, the pure-Rust compiler
+      # remotemedia-sdk-base uses, takes the same flags, so it stands in
+      # through PROTOC: no protoc package. rust-cache keeps the binary.
+      - name: Install protox (protoc stand-in)
+        run: |
+          cargo install protox --version 0.10.0 --features bin --locked
+          echo "PROTOC=$HOME/.cargo/bin/protox" >> "$GITHUB_ENV"
 
       # yolo, llm and eou have no consumer in the workspace, so this is the
       # only thing that builds them. It covers whisper and vad too.
