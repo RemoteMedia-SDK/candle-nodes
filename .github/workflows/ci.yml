@@ -1,0 +1,78 @@
+name: CI
+
+# Checks every model feature, so the ones no consumer enables (yolo, llm,
+# eou) keep compiling, and runs the unit tests for the features the
+# `whisper` plugin ships.
+#
+# Cargo.toml [patch]es remotemedia-sdk-base and remotemedia-plugin-sdk to
+# sibling checkouts (../remotemedia-sdk-base, ../remotemedia-plugin-sdk), as
+# in development. CI clones them beside this repository at the git revs
+# Cargo.toml pins, so there is one place to bump them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Debuginfo is what fills the runner's disk, and CI never reads it.
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  check:
+    name: Check and test
+    runs-on: ubuntu-latest
+    steps:
+      # Removing these takes minutes, so it runs in the background.
+      - name: Free runner disk
+        run: nohup sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &
+
+      - uses: actions/checkout@v4
+
+      - name: Check out sibling repositories at the pinned revs
+        run: |
+          set -euo pipefail
+          clone() {
+            local repo="$1"
+            local rev
+            rev=$(sed -n "s/.*${repo}\", rev = \"\([0-9a-f]*\)\".*/\1/p" Cargo.toml | sort -u)
+            if [ -z "$rev" ]; then
+              echo "Cargo.toml pins no rev for $repo; skipping"
+              return
+            fi
+            if [ "$(printf '%s\n' "$rev" | wc -l)" -ne 1 ]; then
+              echo "::error::Cargo.toml pins more than one rev for $repo: $rev"
+              exit 1
+            fi
+            echo "$repo @ $rev"
+            git clone --filter=blob:none "https://github.com/RemoteMedia-SDK/$repo" "../$repo"
+            git -C "../$repo" checkout --quiet "$rev"
+          }
+          clone remotemedia-sdk-base
+          clone remotemedia-plugin-sdk
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config nasm libclang-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # yolo, llm and eou have no consumer in the workspace, so this is the
+      # only thing that builds them. It covers whisper and vad too.
+      - name: cargo check (all models)
+        run: cargo check --locked --lib --features all-models
+
+      - name: cargo test (whisper, vad, loadable-export)
+        run: cargo test --locked --lib --features whisper,vad,loadable-export

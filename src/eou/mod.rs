@@ -45,7 +45,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "eou")]
-use candle_core::{DType, Device, Tensor};
+use candle_core::{Device, Tensor};
 
 const NODE_TYPE: &str = "parakeet-eou";
 
@@ -100,9 +100,9 @@ impl EncoderCache {
         let ch_shape: Vec<usize> = channel.shape().dims().iter().map(|d| *d as usize).collect();
         let tm_shape: Vec<usize> = time.shape().dims().iter().map(|d| *d as usize).collect();
 
-        let ch_data: Vec<f32> = channel.to_vec1()?.to_vec();
-        let tm_data: Vec<f32> = time.to_vec1()?.to_vec();
-        let len_data: Vec<i64> = channel_len.to_vec1()?.to_vec();
+        let ch_data: Vec<f32> = channel.flatten_all()?.to_vec1()?;
+        let tm_data: Vec<f32> = time.flatten_all()?.to_vec1()?;
+        let len_data: Vec<i64> = channel_len.flatten_all()?.to_vec1()?;
 
         Ok(Self {
             cache_last_channel: ch_data,
@@ -128,18 +128,19 @@ impl EncoderCache {
     fn to_tensors(&self, device: &Device) -> candle_core::Result<(Tensor, Tensor, Tensor)> {
         let channel = Tensor::from_slice(
             &self.cache_last_channel,
-            self.cache_last_channel_shape,
-            DType::F32,
+            self.cache_last_channel_shape.to_vec(),
             device,
         )?;
         let time = Tensor::from_slice(
             &self.cache_last_time,
-            self.cache_last_time_shape,
-            DType::F32,
+            self.cache_last_time_shape.to_vec(),
             device,
         )?;
-        let channel_len =
-            Tensor::from_slice(&self.cache_last_channel_len, DType::I64, device)?;
+        let channel_len = Tensor::from_slice(
+            &self.cache_last_channel_len,
+            self.cache_last_channel_len.len(),
+            device,
+        )?;
         Ok((channel, time, channel_len))
     }
 }
@@ -185,16 +186,16 @@ impl DecoderState {
     /// Convert to ONNX input tensors
     #[cfg(feature = "eou")]
     fn to_tensors(&self, device: &Device) -> candle_core::Result<(Tensor, Tensor)> {
-        let h = Tensor::from_slice(&self.state_h, (1, 1, 640), DType::F32, device)?;
-        let c = Tensor::from_slice(&self.state_c, (1, 1, 640), DType::F32, device)?;
+        let h = Tensor::from_slice(&self.state_h, (1, 1, 640), device)?;
+        let c = Tensor::from_slice(&self.state_c, (1, 1, 640), device)?;
         Ok((h, c))
     }
 
     /// Update from ONNX output tensors
     #[cfg(feature = "eou")]
     fn update_from_tensors(&mut self, h: &Tensor, c: &Tensor) -> candle_core::Result<()> {
-        self.state_h = h.to_vec1()?;
-        self.state_c = c.to_vec1()?;
+        self.state_h = h.flatten_all()?.to_vec1()?;
+        self.state_c = c.flatten_all()?.to_vec1()?;
         Ok(())
     }
 }
@@ -309,17 +310,17 @@ impl ParakeetEOUNode {
         // Download model files if not cached
         let encoder_path = self
             .cache
-            .download_model(ONNX_REPO, format!("{}/encoder.onnx", ONNX_SUBDIR), None)
+            .download_model(ONNX_REPO, &format!("{}/encoder.onnx", ONNX_SUBDIR), None)
             .await?;
 
         let decoder_path = self
             .cache
-            .download_model(ONNX_REPO, format!("{}/decoder_joint.onnx", ONNX_SUBDIR), None)
+            .download_model(ONNX_REPO, &format!("{}/decoder_joint.onnx", ONNX_SUBDIR), None)
             .await?;
 
         let tokenizer_path = self
             .cache
-            .download_model(ONNX_REPO, format!("{}/tokenizer.json", ONNX_SUBDIR), None)
+            .download_model(ONNX_REPO, &format!("{}/tokenizer.json", ONNX_SUBDIR), None)
             .await?;
 
         // Load ONNX models
@@ -432,13 +433,13 @@ impl ParakeetEOUNode {
 
         // Slice to take only (pre_encode_cache + new_frames) for encoder
         let start_frame = total_frames.saturating_sub(SLICE_LEN);
+        // The slice is along the last axis, so it is not contiguous: collect
+        // it in logical (row-major) order rather than via `as_slice()`.
         let features: Vec<f32> = full_features
             .slice(s![.., .., start_frame..])
-            .as_slice()
-            .ok_or_else(|| {
-                CandleNodeError::inference(&self.node_id, "Failed to slice features")
-            })?
-            .to_vec();
+            .iter()
+            .copied()
+            .collect();
 
         let feature_frames = (total_frames - start_frame).min(SLICE_LEN);
         if feature_frames == 0 {
@@ -451,8 +452,8 @@ impl ParakeetEOUNode {
 
         let feature_shape = [1, N_MELS, feature_frames];
 
-        // Run encoder with cache
-        let (encoder_out, new_cache) = {
+        // Run encoder with cache (the cache is updated in place)
+        let (encoder_data, encoder_shape) = {
             let mut enc_cache = self.encoder_cache.write().await;
             self.run_encoder(
                 &features,
@@ -462,9 +463,13 @@ impl ParakeetEOUNode {
                 state,
             )?
         };
-        // Cache updated in place
 
-        let enc_frames = encoder_out.1[2];
+        // TODO(eou): the encoder output is assumed to be [batch, dim, frames]
+        // (NeMo's channels-first convention, dim = 512). This has not been
+        // checked against the altunenes/parakeet-rs ONNX export; if it is
+        // [batch, frames, dim] instead, `encoder_dim` and `enc_frames` swap
+        // and the frame gather below becomes a contiguous chunk.
+        let [_, encoder_dim, enc_frames] = encoder_shape;
         if enc_frames == 0 {
             return Ok(EouOutput {
                 text: String::new(),
@@ -477,23 +482,23 @@ impl ParakeetEOUNode {
         let mut text_output = String::new();
         let mut eou_detected = false;
 
+        // One lock for the whole chunk: the decoder state is threaded through
+        // every frame in order.
+        let mut dec_state = self.decoder_state.write().await;
+
         for t in 0..enc_frames {
-            let current_frame_data: Vec<f32> = encoder_out
-                .0
-                .chunks_exact(N_MELS)
-                .nth(t * N_MELS)
-                .unwrap_or(&[])
-                .to_vec();
+            // Frame t of a row-major [1, dim, frames] buffer: element (d, t)
+            // lives at d * frames + t.
+            let frame: Vec<f32> = (0..encoder_dim)
+                .map(|d| encoder_data[d * enc_frames + t])
+                .collect();
 
-            // Reshape to [1, 512, 1] - encoder output dim is 512
-            let frame_size = 512;
-            let mut frame = vec![0.0; frame_size];
-            if current_frame_data.len() >= frame_size {
-                frame = current_frame_data[..frame_size].to_vec();
-            }
-
+            // TODO(eou): RNN-T greedy decoding should re-run the joint on the
+            // same frame until it emits blank (up to MAX_SYMBOLS_PER_STEP);
+            // this emits at most one symbol per frame.
             let (chunk_text, chunk_eou) = self.run_decoder_step(
                 &frame,
+                &mut dec_state,
                 state,
                 self.config.reset_on_eou,
             )?;
@@ -524,13 +529,9 @@ impl ParakeetEOUNode {
     ) -> Result<(Vec<f32>, [usize; 3])> {
         let (ch_tensor, tm_tensor, len_tensor) = cache.to_tensors(&state.candle_device)?;
 
-        let audio_signal = Tensor::from_slice(
-            features,
-            feature_shape,
-            DType::F32,
-            &state.candle_device,
-        )?;
-        let length_tensor = Tensor::from_slice(&[length], DType::I64, &state.candle_device)?;
+        let audio_signal =
+            Tensor::from_slice(features, feature_shape.to_vec(), &state.candle_device)?;
+        let length_tensor = Tensor::from_slice(&[length], 1, &state.candle_device)?;
 
         let inputs: std::collections::HashMap<String, Tensor> = [
             ("audio_signal".to_string(), audio_signal),
@@ -563,7 +564,7 @@ impl ParakeetEOUNode {
 
         let out_shape: Vec<usize> =
             encoder_out.shape().dims().iter().map(|d| *d as usize).collect();
-        let out_data: Vec<f32> = encoder_out.to_vec1()?;
+        let out_data: Vec<f32> = encoder_out.flatten_all()?.to_vec1()?;
 
         // Update cache
         let new_ch = outputs
@@ -583,38 +584,41 @@ impl ParakeetEOUNode {
             out_shape, out_names
         );
 
-        Ok((out_data, out_shape.try_into().unwrap_or([1, 512, 1])))
+        let out_shape: [usize; 3] = out_shape.try_into().map_err(|shape: Vec<usize>| {
+            CandleNodeError::inference(
+                &self.node_id,
+                format!("Expected a rank-3 encoder output, got shape {:?}", shape),
+            )
+        })?;
+
+        Ok((out_data, out_shape))
     }
 
     /// Run a single decoder step
     #[cfg(feature = "eou")]
     fn run_decoder_step(
         &self,
-        encoder_frame: &[f32], // [512]
+        encoder_frame: &[f32], // [encoder_dim]
+        dec_state: &mut DecoderState,
         state: &EouModelState,
         reset_on_eou: bool,
     ) -> Result<(String, bool)> {
-        let mut dec_state = self.decoder_state.write().await;
-
         let (h_tensor, c_tensor) = dec_state.to_tensors(&state.candle_device)?;
 
-        // Reshape encoder frame to [1, 512, 1]
+        // Reshape encoder frame to [1, encoder_dim, 1]
         let encoder_outputs = Tensor::from_slice(
             encoder_frame,
-            (1, 512, 1),
-            DType::F32,
+            (1, encoder_frame.len(), 1),
             &state.candle_device,
         )?;
 
         // Target token (last predicted token)
-        let targets = Tensor::from_slice(
-            &[dec_state.last_token],
-            (1, 1),
-            DType::I32,
-            &state.candle_device,
-        )?;
+        // TODO(eou): the decoder input/output names and the i32 dtype of
+        // `targets`/`target_length` come from the original draft and have not
+        // been checked against the ONNX graph.
+        let targets = Tensor::from_slice(&[dec_state.last_token], (1, 1), &state.candle_device)?;
 
-        let target_length = Tensor::from_slice(&[1i32], DType::I32, &state.candle_device)?;
+        let target_length = Tensor::from_slice(&[1i32], 1, &state.candle_device)?;
 
         let inputs: std::collections::HashMap<String, Tensor> = [
             ("encoder_outputs".to_string(), encoder_outputs),
@@ -634,7 +638,7 @@ impl ParakeetEOUNode {
             .get("outputs")
             .ok_or_else(|| CandleNodeError::inference(&self.node_id, "Missing decoder logits"))?;
 
-        let logits_vec: Vec<f32> = logits.to_vec1()?;
+        let logits_vec: Vec<f32> = logits.flatten_all()?.to_vec1()?;
         let vocab_size = logits_vec.len();
 
         // Argmax
@@ -759,7 +763,10 @@ fn compute_stft_magnitude(
     // Hann window
     let mut window = vec![0.0f32; win_length];
     for i in 0..win_length {
-        window[i] = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / win_length as f64).sin());
+        // TODO(eou): this is the periodic Hann window (divides by N). Check
+        // which variant the model's NeMo preprocessor was trained with.
+        window[i] =
+            0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / win_length as f32).cos());
     }
 
     let mut magnitude = Array2::zeros((num_freqs, num_frames));

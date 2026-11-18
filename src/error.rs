@@ -108,21 +108,15 @@ impl CandleNodeError {
     }
 }
 
-#[cfg(feature = "whisper")]
-impl From<candle_core::Error> for CandleNodeError {
-    fn from(err: candle_core::Error) -> Self {
-        Self::Candle(err.to_string())
-    }
-}
-
-#[cfg(feature = "yolo")]
-impl From<candle_core::Error> for CandleNodeError {
-    fn from(err: candle_core::Error) -> Self {
-        Self::Candle(err.to_string())
-    }
-}
-
-#[cfg(feature = "llm")]
+/// Every model feature pulls in `candle-core`, so one conversion covers them
+/// all (one impl per feature conflicted whenever two were enabled together).
+#[cfg(any(
+    feature = "whisper",
+    feature = "yolo",
+    feature = "llm",
+    feature = "vad",
+    feature = "eou"
+))]
 impl From<candle_core::Error> for CandleNodeError {
     fn from(err: candle_core::Error) -> Self {
         Self::Candle(err.to_string())

@@ -316,7 +316,10 @@ impl AsyncStreamingNode for PhiNode {
     ) -> std::result::Result<bool, Error> {
         // Handle cancel messages
         if let RuntimeData::ControlMessage { message_type, .. } = message {
-            if message_type == remotemedia_types::ControlMessageType::CancelSpeculation {
+            if matches!(
+                message_type,
+                remotemedia_types::ControlMessageType::CancelSpeculation { .. }
+            ) {
                 debug!("Received cancel message for Phi generation");
                 return Ok(true);
             }
@@ -376,7 +379,10 @@ impl AsyncStreamingNode for LlamaNode {
         _session_id: Option<String>,
     ) -> std::result::Result<bool, Error> {
         if let RuntimeData::ControlMessage { message_type, .. } = message {
-            if message_type == remotemedia_types::ControlMessageType::CancelSpeculation {
+            if matches!(
+                message_type,
+                remotemedia_types::ControlMessageType::CancelSpeculation { .. }
+            ) {
                 debug!("Received cancel message for LLaMA generation");
                 return Ok(true);
             }

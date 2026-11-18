@@ -93,7 +93,8 @@ impl ModelCache {
         feature = "whisper",
         feature = "yolo",
         feature = "llm",
-        feature = "vad"
+        feature = "vad",
+        feature = "eou"
     ))]
     pub async fn download_model(
         &self,
