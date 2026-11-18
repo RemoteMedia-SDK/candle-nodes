@@ -175,7 +175,8 @@ impl DeviceSelector {
     feature = "whisper",
     feature = "yolo",
     feature = "llm",
-    feature = "vad"
+    feature = "vad",
+    feature = "eou"
 ))]
 impl TryFrom<&InferenceDevice> for candle_core::Device {
     type Error = CandleNodeError;

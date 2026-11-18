@@ -60,10 +60,11 @@ impl LlmTokenizer {
     /// Encode text to token IDs
     #[cfg(feature = "llm")]
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
-        let encoding = self
-            .inner
-            .encode(text, add_special_tokens)
-            .map_err(|e| CandleNodeError::data_conversion(format!("Tokenization failed: {}", e)))?;
+        let encoding = self.inner.encode(text, add_special_tokens).map_err(|e| {
+            CandleNodeError::Tokenizer {
+                message: format!("Tokenization failed: {}", e),
+            }
+        })?;
         Ok(encoding.get_ids().to_vec())
     }
 
@@ -80,7 +81,9 @@ impl LlmTokenizer {
     pub fn decode(&self, tokens: &[u32], skip_special_tokens: bool) -> Result<String> {
         self.inner
             .decode(tokens, skip_special_tokens)
-            .map_err(|e| CandleNodeError::data_conversion(format!("Decoding failed: {}", e)))
+            .map_err(|e| CandleNodeError::Tokenizer {
+                message: format!("Decoding failed: {}", e),
+            })
     }
 
     #[cfg(not(feature = "llm"))]
