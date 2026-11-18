@@ -505,12 +505,12 @@ impl WhisperNode {
             }
         };
 
+        // No audio to decode: before any audio, or right after a final (a
+        // VAD's flush at a pause followed by the caller's end-of-input
+        // flush). There is no open utterance to close, so a flush is a
+        // no-op rather than an error: an error here counts toward the
+        // node's circuit breaker and would stop the rest of the stream.
         let Some(window) = window else {
-            if final_result {
-                return Err(Error::Execution(
-                    "Whisper flush received before any audio".to_string(),
-                ));
-            }
             return Ok(0);
         };
 
