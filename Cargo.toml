@@ -40,9 +40,9 @@ rubato = { version = "0.15" }
 # macro, and `NodeFactoryProvider`, through which a host that links this
 # crate registers its nodes. This crate does not depend on
 # remotemedia-sdk-base, so neither do plugins built from it.
-remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "48e41429bafec472f4063127eb27d214ab42e659" }
-remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "48e41429bafec472f4063127eb27d214ab42e659" }
-remotemedia-core-derive = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "48e41429bafec472f4063127eb27d214ab42e659" }
+remotemedia-traits = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "3be71019c3ebf9bd6dc932e3cd1faf64bdb78f41" }
+remotemedia-types  = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "3be71019c3ebf9bd6dc932e3cd1faf64bdb78f41" }
+remotemedia-core-derive = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "3be71019c3ebf9bd6dc932e3cd1faf64bdb78f41" }
 
 # Utilities
 dirs = { version = "5.0" }
@@ -56,13 +56,13 @@ inventory = { version = "0.3" }
 # cargo feature is enabled). This is what flips the `#[node]` macro's
 # conditional FFI emission on, so a wrapper cdylib can re-export
 # WhisperNode through `plugin_export!()` without forking the source.
-remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "48e41429bafec472f4063127eb27d214ab42e659", optional = true }
+remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "3be71019c3ebf9bd6dc932e3cd1faf64bdb78f41", optional = true }
 abi_stable             = { version = "0.11", optional = true }
 
 [dev-dependencies]
 # Host-side context for the examples and integration tests only. Dev
 # dependencies do not reach crates that depend on this one.
-remotemedia-core = { package = "remotemedia-sdk-base", git = "https://github.com/RemoteMedia-SDK/remotemedia-sdk-base", rev = "d33623f2c5912335faabf47b70708f10e806dc15", default-features = false, features = ["multiprocess"] }
+remotemedia-core = { package = "remotemedia-sdk-base", git = "https://github.com/RemoteMedia-SDK/remotemedia-sdk-base", rev = "cb9da3084434059476570d05279b546c0d01a816", default-features = false, features = ["multiprocess"] }
 tokio-test = { version = "0.4" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = { version = "3.8" }
